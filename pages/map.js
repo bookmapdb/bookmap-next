@@ -1,24 +1,24 @@
 // pages/map.js
 // -----------------------------------------------------------------------------
-// ✅ 한 번에 붙여넣기용 완성본 (주석 자세히 포함)
-// - 기능 요약:
-//   1) 노드 그래프(react-force-graph-2d) + 필터(탭/칩) + 범례(노드/링크)
-//   2) 도서 노드 호버/터치 시 썸네일 툴팁 표시, 더블탭(700ms 이내) 시 상세페이지 이동
-//   3) 뷰포트/데이터 변경 시 자동 맞춤(zoomToFit) + 물리 파라미터 안전 주입
-//   4) 로딩 스피너(데이터 로딩 + 엔진 안정화 대기) 오버레이
-//   5) GA4 이벤트 연동(탭 변경, 칩 변경, 도서 상세 보기) — lib/gtag의 event 사용
-// - 자주 고치는 곳: 검색 [🛠️ EDIT ME]
-//   • CONFIG 색/두께/점선/물리감/고정높이
-//   • 범례/설명 텍스트
-//   • GA 이벤트명/파라미터
+// ✅ 한 번에 붙여넣기용 ‘지구본(원형) 수렴 + 라벨 겹침 최소화’ 적용 완성본
+// - 기존 기능 모두 유지 + 아래 개선 추가
+//   1) 라디얼(forceRadial) + 충돌(forceCollide)로 원형 수렴(글로브) 
+//   2) 원 경계(동그란 화면) 밖으로 튀는 노드 자동 클램프
+//   3) 라벨 LOD(확대/호버/도서 우선) + 그리드 기반 라벨 겹침 억제
+//   4) 타입별 동심원(ringRatio)로 구조 가독성 향상
+//   5) 기존 링크 커스텀 렌더, 툴팁, 더블탭 이동, 자동 맞춤 등 그대로 유지
 // -----------------------------------------------------------------------------
 
-/* eslint-disable @next/next/no-img-element */ // <img> 경고 숨기기(원하면 제거)
+/* eslint-disable @next/next/no-img-element */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/router";
-import { event as gaEvent } from "@/lib/gtag";     // ⬅️ GA4 이벤트 유틸 (pages/_app.js 설정 필요)
+import { event as gaEvent } from "@/lib/gtag"; // ⬅️ GA4 이벤트 유틸
+
+// ✨ 추가: d3-force-3d (react-force-graph와 100% 호환되는 힘들)
+//  - 설치: npm i d3-force-3d
+import * as d3 from "d3-force-3d";
 
 import LeftPanel from "@/components/LeftPanel";
 import Loader from "@/components/Loader";
@@ -36,7 +36,7 @@ const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), {
 });
 
 // -----------------------------------------------------------------------------
-// [🛠️ EDIT ME] 빠른 설정 - 그래프 스타일/물리 파라미터/필터 순서
+// [🛠️ EDIT ME] 빠른 설정 - 그래프 스타일/물리/글로브/라벨
 // -----------------------------------------------------------------------------
 const CONFIG = {
   // 좌측 패널 sticky 기준(상단 네비 높이에 맞춰 조절)
@@ -49,14 +49,40 @@ const CONFIG = {
     autoFitPadding: 50,
 
     // d3 물리 (전체 거동)
-    cooldownTime: 3000,    // 값↑ 오래 움직임 (기본 1500 → 3000)
+    cooldownTime: 3000, // 값↑ 오래 움직임 (기본 1500 → 3000)
     d3VelocityDecay: 0.25, // 값↓ 관성 큼 (기본 0.35 → 0.25)
-    d3AlphaMin: 0.0005,    // 더 오래 수렴
+    d3AlphaMin: 0.0005, // 더 오래 수렴
 
     // 링크/반발 세부 튜닝 (아래 useEffect에서 주입)
-    linkDistance: 60,      // 값↑ 노드 간격 넓어짐 (기본 52 → 60)
-    chargeStrength: -300,  // 음수(반발) 절댓값↑ 더 밀어냄 (-240 → -300)
-    linkStrength: 1.2,     // 링크 강도
+    linkDistance: 60, // 값↑ 노드 간격 넓어짐 (기본 52 → 60)
+    linkStrength: 1.2, // 링크 강도
+    chargeStrength: -300, // 음수(반발) 절댓값↑ 더 밀어냄 (-240 → -300)
+  },
+
+  // ✨ 글로브(원형) 레이아웃 파라미터
+  GLOBE: {
+    padding: 80, // 원 경계와 컨테이너 사이 여유(px)
+    radialStrength: 0.08, // 라디얼 힘 강도(값↑ 더 둥글게 조임)
+    // 타입별 ‘링 비율’ (원 반지름 R의 몇 % 지점에 위치시킬지)
+    ringRatio: {
+      book: 0.72, // 도서
+      저자: 0.9,
+      역자: 0.88,
+      카테고리: 0.58,
+      주제: 0.66,
+      장르: 0.5,
+      단계: 0.4,
+      구분: 0.8,
+    },
+    // 충돌 반경(px)
+    collideRadius: { book: 14, other: 12 },
+  },
+
+  // ✨ 라벨 표시 정책(LOD + 충돌 억제)
+  LABEL: {
+    minScaleToShow: 1.05, // 이 배율 이상이면 일반 노드 라벨 노출
+    grid: 18, // 라벨-충돌 억제용 그리드 크기(px)
+    maxCharsBase: 22, // 기본 라벨 최대 글자(배율에 따라 가변)
   },
 
   // 노드 타입별 색상 — "book"은 도서 노드 전용 키(고정)
@@ -95,10 +121,10 @@ const CONFIG = {
       카테고리: [],
       단계: [],
       저자: [],
-      역자: [6, 6],  // 역자 = 점선
+      역자: [6, 6], // 역자 = 점선
       주제: [],
       장르: [],
-      구분: [4, 8],  // 구분 = 듬성 점선
+      구분: [4, 8], // 구분 = 듬성 점선
     },
   },
 
@@ -254,7 +280,7 @@ function extractFacetList(books) {
 function LinkSwatch({ type }) {
   const color = CONFIG.LINK_STYLE.color[type] || "#9ca3af";
   const width = CONFIG.LINK_STYLE.width[type] || 1.5;
-  const dash  = CONFIG.LINK_STYLE.dash[type]  || [];
+  const dash = CONFIG.LINK_STYLE.dash[type] || [];
   return (
     <svg width="52" height="14" className="shrink-0" aria-hidden="true">
       <line
@@ -290,6 +316,11 @@ export default function BookMapPage() {
 
   // 툴팁(도서 노드 hover)
   const [hover, setHover] = useState(null); // { node, x, y }
+
+  // ✅ 라벨-충돌 억제용 set + 호버 노드 id 보관 (drawNode에서 참조)
+  const labelBinsRef = useRef(new Set());
+  const hoveredIdRef = useRef(null);
+  useEffect(() => { hoveredIdRef.current = hover?.node?.id ?? null; }, [hover]);
 
   // 모바일 더블탭 판별 (700ms 이내 같은 노드 2회)
   const [lastTap, setLastTap] = useState({ id: null, ts: 0 });
@@ -380,9 +411,10 @@ export default function BookMapPage() {
   const linkCount = links.length;
 
   // ---------------------------------------------------------------------------
-  // 캔버스 렌더러: 노드(도트 + 라벨)
-  //  - 색상: CONFIG.NODE_COLOR
-  //  - 반지름: r
+  // ✨ 캔버스 렌더러: 노드(도트 + 라벨 LOD)
+  //  - 라벨은 (호버 || 도서 || 줌 배율 충족) 일 때만 표기
+  //  - 같은 프레임에서 가까운 라벨은 그리드 셀 단위로 하나만 표기(겹침 억제)
+  //  - 원형 레이아웃에 맞춰 라벨을 바깥쪽으로 약간 밀어 배치
   // ---------------------------------------------------------------------------
   const drawNode = (node, ctx, scale) => {
     if (!node || node.x == null || node.y == null) return;
@@ -390,18 +422,39 @@ export default function BookMapPage() {
     const isBook = node.type === "book";
     const r = isBook ? 7 : 6;
 
-    // 도트
+    // 도트(점)
     ctx.beginPath();
     ctx.fillStyle = CONFIG.NODE_COLOR[node.type] || "#6b7280";
     ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
     ctx.fill();
 
-    // 라벨
-    const label = node.label || "";
+    // ── 라벨 표시 조건(LOD)
+    const hovered = hoveredIdRef.current && hoveredIdRef.current === node.id;
+    const showLabel = hovered || isBook || scale >= CONFIG.LABEL.minScaleToShow;
+    if (!showLabel) return;
+
+    // ── 라벨 텍스트 준비(확대율에 따른 길이 가변 + 말줄임)
+    const maxChars = Math.max(10, Math.floor(CONFIG.LABEL.maxCharsBase / Math.pow(scale, 0.4)));
+    const raw = node.label || "";
+    const text = raw.length > maxChars ? raw.slice(0, maxChars - 1) + "…" : raw;
+
+    // ── 원형 레이아웃에 맞춘 라벨 오프셋(중심에서 바깥쪽으로 밀어냄)
+    const angle = Math.atan2(node.y, node.x);
+    const off = r + 6;
+    const lx = node.x + off * Math.cos(angle);
+    const ly = node.y + off * Math.sin(angle);
+
+    // ── 라벨-충돌 억제(그리드 셀 단위로 한 프레임에 하나만)
+    const cell = CONFIG.LABEL.grid;
+    const key = `${Math.round(lx / cell)},${Math.round(ly / cell)}`;
+    if (!hovered && labelBinsRef.current.has(key)) return;
+    labelBinsRef.current.add(key);
+
+    // ── 실제 라벨 그리기
     ctx.font = `${Math.max(10, 12 / Math.pow(scale, 0.15))}px ui-sans-serif,-apple-system,BlinkMacSystemFont`;
     ctx.textBaseline = "middle";
     ctx.fillStyle = "#374151";
-    ctx.fillText(label, node.x + r + 6, node.y);
+    ctx.fillText(text, lx, ly);
   };
 
   // 드래그/호버 감지 범위(조금 넓게)
@@ -455,9 +508,6 @@ export default function BookMapPage() {
 
   // ---------------------------------------------------------------------------
   // 클릭/탭 → 첫 탭은 툴팁, 700ms 내 동일 노드 두 번째 탭이면 상세 이동
-  //  - GA 이벤트:
-  //    • 첫 탭 시 "book_preview_open"
-  //    • 더블탭으로 상세 이동 시 "book_detail_click"
   // ---------------------------------------------------------------------------
   const handleClick = (node) => {
     if (!node) return;
@@ -467,7 +517,6 @@ export default function BookMapPage() {
 
       // 2번째 탭/클릭(700ms 이내): 상세 페이지 이동
       if (lastTap.id === node.id && now - lastTap.ts < 700) {
-        // GA: 상세 보기 의도
         gaEvent?.("book_detail_click", {
           content_type: "book",
           item_id: node.bookId,
@@ -505,18 +554,17 @@ export default function BookMapPage() {
 
   // ---------------------------------------------------------------------------
   // [🛠️ EDIT ME] 탭/칩 변경 헬퍼 + GA 이벤트
-  //  - 버튼 onClick 인라인을 함수로 분리하여 GA 이벤트를 함께 전송
   // ---------------------------------------------------------------------------
   function handleTabChange(nextTab) {
     setTab(nextTab);
     setChip(null);
-    gaEvent?.("map_tab_change", { tab: nextTab }); // GA: 탭 변경
+    gaEvent?.("map_tab_change", { tab: nextTab });
   }
 
   function handleChipChange(nextChip) {
     const newValue = nextChip === chip ? null : nextChip; // 토글
     setChip(newValue);
-    gaEvent?.("map_chip_change", { tab, chip: newValue || "(전체)" }); // GA: 칩 변경
+    gaEvent?.("map_chip_change", { tab, chip: newValue || "(전체)" });
   }
 
   // ---------------------------------------------------------------------------
@@ -532,10 +580,14 @@ export default function BookMapPage() {
     return () => clearTimeout(t);
   }, [width, height, nodeCount, linkCount, tab, chip]);
 
-  // d3Force 주입(링크 길이/강도, 반발력)
+  // ---------------------------------------------------------------------------
+  // ✨ d3Force 주입(링크 길이/강도, 반발력, 라디얼, 충돌)
+  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!graphRef.current) return;
     const g = graphRef.current;
+
+    // 링크 길이/강도 + 반발력
     const timer = setTimeout(() => {
       try {
         const lf = g.d3Force && g.d3Force("link");
@@ -548,8 +600,58 @@ export default function BookMapPage() {
         }
       } catch {}
     }, 100);
+
     return () => clearTimeout(timer);
   }, [nodeCount, linkCount]);
+
+  // ✨ 라디얼(원형) + 충돌(forceCollide) 주입 — 사이즈/필터 상태 바뀔 때 갱신
+  useEffect(() => {
+    if (!graphRef.current || !width || !height) return;
+    const g = graphRef.current;
+
+    // 원 반지름(R) 계산
+    const R = Math.max(40, Math.round(Math.min(width, height) / 2 - CONFIG.GLOBE.padding));
+
+    // ① 라디얼(원형) 힘: 타입별 목표 반지름(동심원)
+    const radial = d3
+      .forceRadial((n) => {
+        const ratio = CONFIG.GLOBE.ringRatio[n.type] ?? 0.85;
+        return R * ratio;
+      }, 0, 0)
+      .strength(CONFIG.GLOBE.radialStrength);
+
+    // ② 충돌: 점끼리 겹침 줄이기
+    const collide = d3
+      .forceCollide((n) => (n.type === "book" ? CONFIG.GLOBE.collideRadius.book : CONFIG.GLOBE.collideRadius.other))
+      .strength(0.75);
+
+    try {
+      g.d3Force("radial", radial);
+      g.d3Force("collide", collide);
+    } catch {}
+  }, [width, height, nodeCount, linkCount, tab, chip]);
+
+  // ---------------------------------------------------------------------------
+  // ✨ 원 경계 밖으로 나가는 노드 ‘클램프’ — 매 틱마다 살짝 보정
+  // ---------------------------------------------------------------------------
+  const clampToGlobe = () => {
+    if (!graphRef.current) return;
+    const W = width || 0;
+    const H = height || 0;
+    if (W <= 0 || H <= 0) return;
+
+    const R = Math.max(40, Math.round(Math.min(W, H) / 2 - CONFIG.GLOBE.padding));
+    const data = graphRef.current.graphData?.() || { nodes: [] };
+    for (const n of data.nodes) {
+      if (n?.x == null || n?.y == null) continue;
+      const d = Math.hypot(n.x, n.y);
+      if (d > R) {
+        const k = R / (d || 1);
+        n.x *= k; // 바깥으로 튀면 원 안쪽 경계로 붙임
+        n.y *= k;
+      }
+    }
+  };
 
   // 강제 리마운트 키(그래프 내부 상태 초기화용)
   const graphKey = `${tab}|${chip ?? "ALL"}|${nodeCount}|${linkCount}`;
@@ -577,8 +679,7 @@ export default function BookMapPage() {
               key={t}
               onClick={() => handleTabChange(t)}
               className={`rounded-full border px-3 py-1.5 text-sm transition ${
-                tab === t ? "bg-gray-900 text-white border-gray-900"
-                          : "text-gray-700 border-gray-300 hover:bg-gray-100"
+                tab === t ? "bg-gray-900 text-white border-gray-900" : "text-gray-700 border-gray-300 hover:bg-gray-100"
               }`}
             >
               {t}
@@ -592,8 +693,7 @@ export default function BookMapPage() {
             <button
               onClick={() => handleChipChange(null)}
               className={`rounded-full border px-3 py-1.5 text-sm transition ${
-                chip == null ? "bg-blue-600 text-white border-blue-600"
-                             : "text-gray-700 border-gray-300 hover:bg-gray-100"
+                chip == null ? "bg-blue-600 text-white border-blue-600" : "text-gray-700 border-gray-300 hover:bg-gray-100"
               }`}
             >
               전체
@@ -603,8 +703,7 @@ export default function BookMapPage() {
                 key={v}
                 onClick={() => handleChipChange(v)}
                 className={`rounded-full border px-3 py-1.5 text-sm transition ${
-                  chip === v ? "bg-blue-600 text-white border-blue-600"
-                             : "text-gray-700 border-gray-300 hover:bg-gray-100"
+                  chip === v ? "bg-blue-600 text-white border-blue-600" : "text-gray-700 border-gray-300 hover:bg-gray-100"
                 }`}
                 title={v}
               >
@@ -619,8 +718,14 @@ export default function BookMapPage() {
           {/* 노드(점) 범례 */}
           <div className="flex flex-wrap items-center gap-5">
             {[
-              ["도서", "book"], ["저자", "저자"], ["역자", "역자"], ["카테고리", "카테고리"],
-              ["주제", "주제"], ["장르", "장르"], ["단계", "단계"], ["구분", "구분"],
+              ["도서", "book"],
+              ["저자", "저자"],
+              ["역자", "역자"],
+              ["카테고리", "카테고리"],
+              ["주제", "주제"],
+              ["장르", "장르"],
+              ["단계", "단계"],
+              ["구분", "구분"],
             ].map(([label, key]) => (
               <span key={label} className="inline-flex items-center gap-2">
                 <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: CONFIG.NODE_COLOR[key] }} />
@@ -687,11 +792,11 @@ export default function BookMapPage() {
                   graphData={{ nodes, links }}
                   enableZoomPanInteraction={true}
                   enableNodeDrag={true}
-                  nodeLabel={() => ""}                 // 브라우저 기본 title 툴팁 끄기
-                  nodeCanvasObject={drawNode}           // 노드(도트+라벨)
+                  nodeLabel={() => ""} // 기본 title 툴팁 끄기(브라우저)
+                  nodeCanvasObject={drawNode} // 노드(도트+라벨 LOD)
                   nodePointerAreaPaint={nodePointerAreaPaint}
-                  linkColor={() => "rgba(0,0,0,0)"}      // 기본 링크 숨김
-                  linkCanvasObject={drawLink}            // 링크(선) 커스텀 렌더
+                  linkColor={() => "rgba(0,0,0,0)"} // 기본 링크 숨김
+                  linkCanvasObject={drawLink} // 링크(선) 커스텀 렌더
                   linkCanvasObjectMode={() => "after"}
                   cooldownTime={CONFIG.FORCE.cooldownTime}
                   d3VelocityDecay={CONFIG.FORCE.d3VelocityDecay}
@@ -700,10 +805,24 @@ export default function BookMapPage() {
                   onNodeHover={handleHover}
                   onNodeClick={handleClick}
                   // 빈 배경 클릭/우클릭 → 툴팁 닫기
-                  onBackgroundClick={() => { setHover(null); setLastTap({ id: null, ts: 0 }); }}
-                  onBackgroundRightClick={() => { setHover(null); setLastTap({ id: null, ts: 0 }); }}
+                  onBackgroundClick={() => {
+                    setHover(null);
+                    setLastTap({ id: null, ts: 0 });
+                  }}
+                  onBackgroundRightClick={() => {
+                    setHover(null);
+                    setLastTap({ id: null, ts: 0 });
+                  }}
                   // (선택) 노드 우클릭 → 툴팁 닫기
-                  onNodeRightClick={() => { setHover(null); }}
+                  onNodeRightClick={() => {
+                    setHover(null);
+                  }}
+                  // ✨ 라벨-셀 비움: 프레임마다 중복 셀 초기화(라벨 충돌 억제)
+                  onRenderFramePre={() => {
+                    labelBinsRef.current.clear();
+                  }}
+                  // ✨ 엔진 틱마다 원 경계로 클램프(둥근 형태 유지)
+                  onEngineTick={clampToGlobe}
                   // 엔진 안정화 뒤: 스피너 닫고, 보기 좋게 화면 맞춤(약간 지연)
                   onEngineStop={() => {
                     setGraphReady(true);
@@ -734,7 +853,9 @@ export default function BookMapPage() {
                           alt=""
                           className="h-full w-full object-cover"
                           loading="lazy"
-                          onError={(e) => { e.currentTarget.style.display = "none"; }}
+                          onError={(e) => {
+                            e.currentTarget.style.display = "none";
+                          }}
                         />
                       ) : (
                         <div className="h-full w-full bg-gray-700 flex items-center justify-center">
@@ -743,22 +864,14 @@ export default function BookMapPage() {
                       )}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="font-semibold text-sm leading-tight line-clamp-2 mb-1">
-                        {hover.node.label}
-                      </div>
+                      <div className="font-semibold text-sm leading-tight line-clamp-2 mb-1">{hover.node.label}</div>
                       {hover.node.author && (
-                        <div className="text-xs text-blue-200 truncate mb-0.5">
-                          👤 {hover.node.author}
-                        </div>
+                        <div className="text-xs text-blue-200 truncate mb-0.5">👤 {hover.node.author}</div>
                       )}
                       {hover.node.publisher && (
-                        <div className="text-[11px] text-gray-300 truncate">
-                          🏢 {hover.node.publisher}
-                        </div>
+                        <div className="text-[11px] text-gray-300 truncate">🏢 {hover.node.publisher}</div>
                       )}
-                      <div className="mt-2 text-[10px] text-gray-400">
-                        더블탭(또는 더블클릭)으로 상세 보기
-                      </div>
+                      <div className="mt-2 text-[10px] text-gray-400">더블탭(또는 더블클릭)으로 상세 보기</div>
                     </div>
                   </div>
                 </div>
