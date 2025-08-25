@@ -325,7 +325,7 @@ const LinkSwatch = React.memo(({ type }) => {
   const { color, width, dash } = useMemo(() => ({
     color: CONFIG.LINK_STYLE.color[type] || "#9ca3af",
     width: CONFIG.LINK_STYLE.width[type] || 1.5,
-    dash: CONFIG.LINK.STYLE.dash[type] || [],
+    dash: CONFIG.LINK_STYLE.dash[type] || [],
   }), [type]);
 
   return (
