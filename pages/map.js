@@ -51,22 +51,22 @@ const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), {
 const CONFIG = {
   STICKY_TOP: 96,
 
-  // 실시간 물리 반응을 위한 엔진 설정
+  // ✅ 더 강력한 물리 반응을 위한 엔진 설정
   FORCE: Object.freeze({
     autoFitMs: 1200,
     autoFitPadding: 70,
     // 더 활발한 물리 시뮬레이션을 위한 설정
     cooldownTime: 5000, // 더 오래 움직임
-    d3VelocityDecay: 0.15, // 더 낮은 감속 (더 오래 움직임)
+    d3VelocityDecay: 0.05, // 🔥 더 낮은 감속 (노드들이 더 오래 움직임)
     d3AlphaMin: 0.0001, // 매우 미세한 움직임까지 유지
     // 드래그 중 물리 반응을 위한 특별 설정
-    dragAlphaTarget: 0.3, // 드래그 중 시뮬레이션 강도
+    dragAlphaTarget: 0.35, // 🔥 드래그 중 시뮬레이션 강도 증가
     dragCooldownTime: 1000, // 드래그 중 짧은 쿨다운
     // 링크 설정 (더 유연하게)
     linkDistance: 70,
-    linkStrength: 0.6, // 더 부드러운 연결
+    linkStrength: 0.8, // 🔥 더 강한 연결 (끌려오는 힘 증가)
     // 반발력 설정 (상호작용 강화)
-    chargeStrength: -250, // 적절한 반발력
+    chargeStrength: -500, // 🔥 반발력 증가 (노드들이 더 멀리 밀려남)
     chargeDistanceMax: 500, // 넓은 상호작용 범위
   }),
 
@@ -325,7 +325,7 @@ const LinkSwatch = React.memo(({ type }) => {
   const { color, width, dash } = useMemo(() => ({
     color: CONFIG.LINK_STYLE.color[type] || "#9ca3af",
     width: CONFIG.LINK_STYLE.width[type] || 1.5,
-    dash: CONFIG.LINK_STYLE.dash[type] || [],
+    dash: CONFIG.LINK.STYLE.dash[type] || [],
   }), [type]);
 
   return (
