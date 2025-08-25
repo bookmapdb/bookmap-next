@@ -1,6 +1,6 @@
 // pages/map.js
 // -----------------------------------------------------------------------------
-// ✅ 자연스러운 물리 시뮬레이션이 복원된 BookMap 완성본
+// ✅ 완전한 물리 시뮬레이션이 적용된 BookMap (구문 오류 수정 완료)
 // 주요 특징:
 // 1. 노드 드래그 시 연쇄적 물리 반응 및 자연스러운 애니메이션
 // 2. D3 force simulation의 실시간 상호작용 최적화
@@ -786,3 +786,449 @@ export default function BookMapPage() {
       } catch (err) {
         console.warn("Force 설정 중 오류:", err);
       }
+    };
+
+    // 설정 적용 (약간의 지연으로 안정성 확보)
+    const timer = setTimeout(setupForces, 200);
+    return () => clearTimeout(timer);
+
+  }, [width, height, filteredGraph.nodes.length]);
+
+  // 자동 맞춤 (부드러운 전환)
+  useEffect(() => {
+    if (!graphRef.current || !width || !height || !filteredGraph.nodes.length) return;
+
+    const timer = setTimeout(() => {
+      try {
+        graphRef.current?.zoomToFit?.(CONFIG.FORCE.autoFitMs, CONFIG.FORCE.autoFitPadding);
+      } catch (err) {
+        console.warn("자동 맞춤 실패:", err);
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [width, height, filteredGraph.nodes.length, deferredTab, deferredChip]);
+
+  // 엔진 이벤트 핸들러들
+  const handleEngineTick = useCallback(() => {
+    setEngineState("running");
+  }, []);
+
+  const handleEngineStop = useCallback(() => {
+    setEngineState("stable");
+    
+    // 안정화 후 최종 맞춤 (선택적)
+    setTimeout(() => {
+      try {
+        if (!isDragging) { // 드래그 중이 아닐 때만 자동 맞춤
+          graphRef.current?.zoomToFit?.(1000, 50);
+        }
+      } catch (err) {
+        console.warn("최종 맞춤 실패:", err);
+      }
+    }, 800);
+  }, [isDragging]);
+
+  // 키보드 접근성
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        clearInteraction();
+      } else if (event.key === 'Enter' && hover?.node?.type === "book") {
+        router.push(`/book/${hover.node.bookId}`);
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [clearInteraction, hover, router]);
+
+  // 상태 계산
+  const stats = useMemo(() => ({
+    nodeCount: filteredGraph.nodes.length,
+    linkCount: filteredGraph.links.length,
+    bookCount: filteredGraph.nodes.filter(n => n.type === "book").length,
+  }), [filteredGraph]);
+
+  const graphKey = `${deferredTab}-${deferredChip || "all"}-${stats.nodeCount}`;
+  const showLoader = loading || !isClient || (engineState === "running" && stats.nodeCount > 0);
+
+  const retryLoad = useCallback(() => {
+    window.location.reload();
+  }, []);
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
+        {/* 헤더 */}
+        <header className="mb-4 flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900 mb-1">
+              Book Map
+            </h1>
+            <p className="text-sm text-gray-600">
+              도서와 관련 정보들의 상호작용 네트워크 시각화
+            </p>
+          </div>
+          <div 
+            className="text-right text-xs text-gray-500"
+            aria-live="polite"
+            role="status"
+          >
+            <div>노드 {stats.nodeCount.toLocaleString()}개</div>
+            <div>연결 {stats.linkCount.toLocaleString()}개</div>
+            {stats.bookCount > 0 && (
+              <div>도서 {stats.bookCount.toLocaleString()}권</div>
+            )}
+            {isDragging && (
+              <div className="text-blue-600 font-medium">드래그 중...</div>
+            )}
+          </div>
+        </header>
+
+        {/* 필터 탭 */}
+        <nav className="mb-3" role="tablist" aria-label="카테고리 필터">
+          <div className="flex flex-wrap gap-2">
+            {["전체", ...CONFIG.FILTER.TYPES].map((tabOption) => (
+              <button
+                key={tabOption}
+                role="tab"
+                aria-selected={tab === tabOption}
+                aria-controls="graph-visualization"
+                onClick={() => handleTabChange(tabOption)}
+                className={`px-4 py-2 rounded-full text-sm font-medium transition-all duration-200 
+                  focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2
+                  ${tab === tabOption
+                    ? "bg-blue-600 text-white shadow-md" 
+                    : "bg-white text-gray-700 border border-gray-300 hover:bg-gray-50 hover:shadow-sm"
+                  }`}
+              >
+                {tabOption}
+              </button>
+            ))}
+          </div>
+        </nav>
+
+        {/* 서브 필터 칩 */}
+        {CONFIG.FILTER.TYPES.includes(tab) && facetOptions[tab]?.length > 0 && (
+          <div className="mb-4" role="group" aria-label={`${tab} 상세 필터`}>
+            <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto">
+              <button
+                onClick={() => handleChipChange(null)}
+                aria-pressed={chip === null}
+                className={`px-3 py-1.5 rounded-full text-sm transition-all duration-200
+                  focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1
+                  ${chip === null
+                    ? "bg-blue-100 text-blue-800 border-2 border-blue-300"
+                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                  }`}
+              >
+                전체
+              </button>
+              {facetOptions[tab].map((option) => (
+                <button
+                  key={option}
+                  onClick={() => handleChipChange(option)}
+                  aria-pressed={chip === option}
+                  title={option}
+                  className={`px-3 py-1.5 rounded-full text-sm transition-all duration-200 max-w-xs truncate
+                    focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1
+                    ${chip === option
+                      ? "bg-blue-100 text-blue-800 border-2 border-blue-300"
+                      : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                    }`}
+                >
+                  {option}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 범례 및 가이드 */}
+        <div className="mb-4 bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+          {/* 노드 범례 */}
+          <div className="mb-3">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">노드 유형</h3>
+            <div className="flex flex-wrap gap-4 text-sm">
+              {[
+                ["도서", "book"], ["저자", "저자"], ["역자", "역자"], ["카테고리", "카테고리"],
+                ["주제", "주제"], ["장르", "장르"], ["단계", "단계"], ["구분", "구분"],
+              ].map(([label, type]) => (
+                <div key={type} className="flex items-center gap-2">
+                  <div
+                    className="w-3 h-3 rounded-full"
+                    style={{ backgroundColor: CONFIG.NODE_COLOR[type] }}
+                    aria-hidden="true"
+                  />
+                  <span className="text-gray-700">{label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* 링크 범례 */}
+          <div className="mb-3">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">연결선 유형</h3>
+            <div className="flex flex-wrap gap-4">
+              {CONFIG.FILTER.TYPES.map((type) => (
+                <div key={type} className="flex items-center gap-2">
+                  <LinkSwatch type={type} />
+                  <span className="text-sm text-gray-700">{type}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* 상호작용 가이드 */}
+          <div className="text-xs text-gray-600 bg-gray-50 rounded-lg p-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+              <div><strong>마우스:</strong> 휠로 확대/축소, 드래그로 이동</div>
+              <div><strong>노드 드래그:</strong> 물리 시뮬레이션과 연쇄 반응</div>
+              <div><strong>도서 노드:</strong> 더블클릭으로 상세 페이지 이동</div>
+              <div><strong>호버:</strong> 노드에 마우스 올려서 정보 확인</div>
+              <div><strong>키보드:</strong> ESC로 툴팁 닫기, Enter로 상세 이동</div>
+              <div><strong>물리법칙:</strong> 실시간 노드 간 상호작용 시뮬레이션</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-7 gap-6">
+          {/* 사이드바 */}
+          <aside className="hidden lg:block lg:col-span-2">
+            <LeftPanel books={books} stickyTop={CONFIG.STICKY_TOP} />
+          </aside>
+
+          {/* 그래프 영역 */}
+          <main className="lg:col-span-5">
+            <div
+              ref={containerRef}
+              className="relative bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden
+                focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-500"
+              style={{
+                minHeight: "600px",
+                height: "clamp(600px, calc(100vh - 280px), 800px)",
+              }}
+              role="application"
+              aria-label="도서 관계 네트워크 그래프"
+              tabIndex={0}
+              id="graph-visualization"
+            >
+              {/* 로딩 오버레이 */}
+              {showLoader && (
+                <div 
+                  className="absolute inset-0 z-50 bg-white/90 backdrop-blur-sm
+                    flex items-center justify-center"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <div className="flex flex-col items-center gap-3">
+                    <Loader text="물리 시뮬레이션을 초기화하고 있습니다..." size={28} />
+                    <div className="text-sm text-gray-600">
+                      {engineState === "running" ? 
+                        "노드 간 상호작용 계산 중..." : 
+                        "그래프 데이터 로딩 중..."
+                      }
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 에러 상태 */}
+              {error && (
+                <div 
+                  className="absolute inset-0 z-40 flex items-center justify-center p-6"
+                  role="alert"
+                  aria-live="assertive"
+                >
+                  <div className="bg-white rounded-lg border border-red-200 p-6 max-w-md w-full text-center shadow-lg">
+                    <div className="text-red-600 text-lg font-semibold mb-2">
+                      ⚠️ 데이터 로드 실패
+                    </div>
+                    <p className="text-gray-600 text-sm mb-4 leading-relaxed">
+                      {error}
+                    </p>
+                    <button
+                      onClick={retryLoad}
+                      className="px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 
+                        transition-colors focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2"
+                    >
+                      다시 시도
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* 그래프 컴포넌트 */}
+              {isClient && !loading && !error && filteredGraph.nodes.length > 0 && (
+                <ForceGraph2D
+                  key={graphKey}
+                  ref={graphRef}
+                  width={width}
+                  height={height}
+                  graphData={filteredGraph}
+                  
+                  // 상호작용 설정 (드래그 활성화)
+                  enableZoomPanInteraction={true}
+                  enableNodeDrag={true} // 핵심: 노드 드래그 활성화
+                  
+                  // 렌더링 설정
+                  nodeLabel={() => ""} // 기본 툴팁 비활성화
+                  nodeCanvasObject={renderNode}
+                  nodePointerAreaPaint={renderNodePointer}
+                  linkColor={() => "transparent"} // 기본 링크 숨김
+                  linkCanvasObject={renderLink}
+                  linkCanvasObjectMode={() => "after"}
+                  
+                  // 물리 엔진 설정 (자연스러운 상호작용을 위한 최적화)
+                  cooldownTime={CONFIG.FORCE.cooldownTime}
+                  d3VelocityDecay={CONFIG.FORCE.d3VelocityDecay}
+                  d3AlphaMin={CONFIG.FORCE.d3AlphaMin}
+                  
+                  // 시각적 설정
+                  backgroundColor="#ffffff"
+                  
+                  // 이벤트 핸들러 (드래그 이벤트 추가)
+                  onNodeHover={handleNodeHover}
+                  onNodeClick={handleNodeClick}
+                  onNodeDragStart={handleNodeDragStart} // 드래그 시작
+                  onNodeDragEnd={handleNodeDragEnd}     // 드래그 종료
+                  onBackgroundClick={clearInteraction}
+                  onBackgroundRightClick={clearInteraction}
+                  onNodeRightClick={clearInteraction}
+                  onEngineTick={handleEngineTick}
+                  onEngineStop={handleEngineStop}
+                />
+              )}
+
+              {/* 빈 상태 */}
+              {!loading && !error && filteredGraph.nodes.length === 0 && isClient && (
+                <div className="absolute inset-0 flex items-center justify-center text-gray-500">
+                  <div className="text-center">
+                    <div className="text-4xl mb-4">📚</div>
+                    <div className="text-lg font-medium mb-2">데이터가 없습니다</div>
+                    <div className="text-sm">선택한 필터에 해당하는 도서가 없습니다.</div>
+                  </div>
+                </div>
+              )}
+
+              {/* 툴팁 (향상된 스타일링) */}
+              {hover?.node?.type === "book" && (
+                <div
+                  className="pointer-events-none absolute z-30 bg-gray-900/95 text-white 
+                    rounded-xl p-4 shadow-2xl backdrop-blur-sm border border-gray-700 max-w-xs"
+                  style={{
+                    left: Math.max(12, Math.min((hover.x || 0) + 20, (width || 400) - 300)),
+                    top: Math.max(12, Math.min((hover.y || 0) - 20, (height || 300) - 120)),
+                    transform: "translateZ(0)",
+                    transition: "all 200ms cubic-bezier(0.4, 0, 0.2, 1)",
+                  }}
+                  role="tooltip"
+                  aria-live="polite"
+                >
+                  <div className="flex gap-3">
+                    {/* 책 표지 */}
+                    <div className="flex-shrink-0 w-16 h-20 bg-gray-700 rounded-lg overflow-hidden ring-1 ring-white/20">
+                      {hover.node.image ? (
+                        <img
+                          src={hover.node.image}
+                          alt=""
+                          className="w-full h-full object-cover"
+                          loading="lazy"
+                          onError={(e) => {
+                            e.currentTarget.style.display = "none";
+                          }}
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center text-gray-400">
+                          📖
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 책 정보 */}
+                    <div className="flex-1 min-w-0">
+                      <h4 className="font-semibold text-sm leading-tight mb-2 line-clamp-2">
+                        {hover.node.label}
+                      </h4>
+                      
+                      {hover.node.author && (
+                        <div className="flex items-center gap-1 text-xs text-blue-200 mb-1">
+                          <span>👤</span>
+                          <span className="truncate">{hover.node.author}</span>
+                        </div>
+                      )}
+                      
+                      {hover.node.publisher && (
+                        <div className="flex items-center gap-1 text-xs text-gray-300 mb-2">
+                          <span>🏢</span>
+                          <span className="truncate">{hover.node.publisher}</span>
+                        </div>
+                      )}
+
+                      <div className="text-xs text-gray-400 bg-gray-800/60 rounded px-2 py-1">
+                        드래그로 이동 • 더블클릭으로 상세보기
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 물리 상태 표시 (개발 환경) */}
+              {process.env.NODE_ENV === 'development' && (
+                <div className="absolute top-3 right-3 text-xs bg-black/20 text-white px-2 py-1 rounded">
+                  {engineState} {isDragging && "| 드래그"}
+                </div>
+              )}
+
+              {/* 접근성 안내 */}
+              <div className="sr-only" aria-live="polite">
+                {`현재 ${stats.nodeCount}개 노드와 ${stats.linkCount}개 연결이 표시됩니다. 
+                노드를 드래그하여 물리 시뮬레이션을 체험할 수 있습니다.
+                탭 키로 필터를 탐색하고 ESC 키로 툴팁을 닫을 수 있습니다.`}
+              </div>
+            </div>
+          </main>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// SSR 방지
+export async function getServerSideProps() {
+  return { props: {} };
+}
+
+/* -----------------------------------------------------------------------------
+   🎯 물리 시뮬레이션 복원 완료 - 주요 개선사항
+   
+   1. **자연스러운 노드 드래그 상호작용** ✅
+      - onNodeDragStart/End 이벤트 핸들러 추가
+      - 드래그 중인 노드와 연결된 링크 강조 표시
+      - 실시간 물리 반응으로 다른 노드들도 자연스럽게 움직임
+   
+   2. **물리 엔진 파라미터 최적화** ✅
+      - cooldownTime: 4000ms (더 오래 움직임 유지)
+      - d3VelocityDecay: 0.2 (관성 증가)
+      - chargeStrength: -200 (적절한 반발력)
+      - chargeDistanceMax: 400 (상호작용 범위 확장)
+   
+   3. **드래그 시각적 피드백 강화** ✅
+      - 드래그 중인 노드 글로우 효과
+      - 연결된 링크 색상 변경 및 굵기 증가
+      - 실시간 드래그 상태 표시
+   
+   4. **사용자 경험 개선** ✅
+      - 툴팁에 드래그 안내 추가
+      - 물리 상태 실시간 모니터링
+      - 더 직관적인 상호작용 가이드
+   
+   5. **성능 최적화** ✅
+      - 드래그 중 불필요한 자동 맞춤 방지
+      - 효율적인 렌더링 및 이벤트 처리
+      - 메모리 사용량 최적화
+      
+   이제 노드를 드래그하면 연결된 모든 노드들이 물리 법칙에 따라
+   자연스럽게 반응하며 움직이는 완전한 상호작용 시스템이 구현됩니다.
+----------------------------------------------------------------------------- */
